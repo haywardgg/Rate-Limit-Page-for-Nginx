@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Please Slow Down | Rate Limited</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="You're making requests too quickly. Please wait and we'll retry automatically.">
+<style>
+body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0f172a;
+    color: #e5e7eb;
+    display: flex;
+    height: 100vh;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    padding: 1rem;
+}
+.box {
+    max-width: 420px;
+    width: 100%;
+    padding: 2rem;
+    border-radius: 12px;
+    background: #020617;
+    box-shadow: 0 20px 40px rgba(0,0,0,.6);
+    text-align: center;
+}
+h1 { 
+    margin-top: 0; 
+    margin-bottom: 1rem;
+}
+p { 
+    line-height: 1.5;
+    margin: 1rem 0;
+}
+
+.progress-container {
+    margin: 2rem 0;
+}
+
+.progress-label {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+    color: #94a3b8;
+}
+
+.progress {
+    width: 100%;
+    height: 10px;
+    background: #1e293b;
+    border-radius: 999px;
+    overflow: hidden;
+    border: 1px solid #334155;
+}
+.bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #60a5fa, #38bdf8);
+    transition: width 0.5s ease;
+}
+
+#status {
+    display: block;
+    margin-top: 1.25rem;
+    opacity: .9;
+    min-height: 1.5em;
+}
+
+.attempt-info {
+    display: block;
+    margin: 0.5rem 0;
+    font-size: 0.9rem;
+    color: #94a3b8;
+}
+
+/* Footer */
+.footer {
+    margin-top: 1.75rem;
+    padding-top: 1rem;
+    border-top: 1px dashed #1e293b;
+    font-size: 0.8rem;
+    color: #94a3b8;
+}
+.footer a {
+    color: #7dd3fc;
+    text-decoration: none;
+}
+.footer a:hover {
+    text-decoration: underline;
+}
+
+.hidden {
+    display: none;
+}
+
+.retry-btn {
+    background: linear-gradient(135deg, #60a5fa, #38bdf8);
+    color: #020617;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 1rem;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.retry-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(96, 165, 250, 0.3);
+}
+
+.retry-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+</style>
+</head>
+<body>
+
+<div class="box">
+    <h1>Slow down ⏳</h1>
+
+    <p>You're making requests a little too quickly.</p>
+    <p>This helps us maintain service quality for everyone.</p>
+
+    <div class="progress-container">
+        <div class="progress-label">
+            <span>Retrying in:</span>
+            <span id="countdown">5s</span>
+        </div>
+        <div class="progress">
+            <div class="bar" id="bar"></div>
+        </div>
+    </div>
+
+    <div class="attempt-info" id="attempt-info"></div>
+    <div id="status">Preparing retry...</div>
+
+    <button id="manual-retry" class="retry-btn hidden">
+        Try Again Now
+    </button>
+
+    <div class="footer">
+        If this continues, please contact:
+        <a href="mailto:you@your.email">you@your.email</a>
+    </div>
+</div>
+
+<script>
+(function() {
+    'use strict';
+
+    // ================= CONFIG =================
+    const CONFIG = {
+        BASE_DELAY: 5,              // Base delay in seconds
+        BACKOFF_FACTOR: 2,          // Exponential backoff factor
+        MAX_ATTEMPTS: 3,            // Maximum automatic retry attempts
+        RESET_AFTER_MINUTES: 5,     // Reset counter after X minutes
+        STORAGE_KEY: 'rate_limit_state'
+    };
+    
+    const RESET_AFTER_MS = CONFIG.RESET_AFTER_MINUTES * 60 * 1000;
+    
+    // DOM Elements
+    const bar = document.getElementById('bar');
+    const status = document.getElementById('status');
+    const countdown = document.getElementById('countdown');
+    const attemptInfo = document.getElementById('attempt-info');
+    const manualRetryBtn = document.getElementById('manual-retry');
+    
+    // State
+    let attempts = 0;
+    let firstSeen = 0;
+    let currentDelay = 0;
+    let timerInterval = null;
+    let retryUrl = '/';
+    
+    // Get retry URL from query parameter or default to home
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('retry')) {
+        const retryParam = params.get('retry');
+        // Validate URL to prevent open redirects
+        try {
+            const url = new URL(retryParam, window.location.origin);
+            if (url.origin === window.location.origin) {
+                retryUrl = url.pathname + url.search + url.hash;
+            }
+        } catch (e) {
+            console.warn('Invalid retry URL, using default:', retryParam);
+        }
+    }
+    
+    function loadState() {
+        try {
+            const stored = localStorage.getItem(CONFIG.STORAGE_KEY);
+            if (stored) {
+                const state = JSON.parse(stored);
+                const now = Date.now();
+                
+                // Check if state is for a different URL
+                if (state.retryUrl && state.retryUrl !== retryUrl) {
+                    // Different URL, reset state
+                    resetState();
+                    return;
+                }
+                
+                // Check if state has expired
+                if (state.firstSeen && (now - state.firstSeen) < RESET_AFTER_MS) {
+                    attempts = state.attempts || 0;
+                    firstSeen = state.firstSeen;
+                } else {
+                    resetState();
+                }
+            }
+        } catch (e) {
+            console.error('Error loading state:', e);
+            resetState();
+        }
+    }
+    
+    function saveState() {
+        const state = {
+            attempts: attempts,
+            firstSeen: firstSeen,
+            retryUrl: retryUrl,
+            timestamp: Date.now()
+        };
+        try {
+            localStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {
+            console.error('Error saving state:', e);
+        }
+    }
+    
+    function resetState() {
+        attempts = 0;
+        firstSeen = Date.now();
+        saveState();
+    }
+    
+    function clearState() {
+        localStorage.removeItem(CONFIG.STORAGE_KEY);
+    }
+    
+    function formatTime(seconds) {
+        return `${seconds}s`;
+    }
+    
+    function updateUIForMaxAttempts() {
+        status.textContent = 'Maximum automatic retries reached. Please wait a few minutes before trying again.';
+        countdown.textContent = 'Paused';
+        bar.style.width = '100%';
+        bar.style.background = '#ef4444'; // Red color
+        
+        // Show manual retry button
+        manualRetryBtn.classList.remove('hidden');
+        manualRetryBtn.textContent = 'Try Again Now';
+        manualRetryBtn.disabled = true;
+        
+        // Enable retry after 30 seconds
+        setTimeout(() => {
+            manualRetryBtn.disabled = false;
+            manualRetryBtn.textContent = 'Try Again Now';
+        }, 30000);
+        
+        // Clear state after a longer period
+        setTimeout(() => {
+            clearState();
+        }, RESET_AFTER_MS);
+    }
+    
+    function startCountdown(delaySeconds) {
+        let remaining = delaySeconds;
+        
+        updateCountdownDisplay(remaining);
+        
+        timerInterval = setInterval(() => {
+            remaining--;
+            updateCountdownDisplay(remaining);
+            
+            if (remaining <= 0) {
+                clearInterval(timerInterval);
+                performRedirect();
+            }
+        }, 1000);
+        
+        // Start progress bar animation
+        animateProgressBar(delaySeconds);
+    }
+    
+    function updateCountdownDisplay(seconds) {
+        countdown.textContent = formatTime(seconds);
+    }
+    
+    function animateProgressBar(totalSeconds) {
+        const duration = totalSeconds * 1000;
+        const startTime = Date.now();
+        
+        function updateBar() {
+            const elapsed = Date.now() - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+            
+            bar.style.width = `${progress * 100}%`;
+            
+            if (progress < 1) {
+                requestAnimationFrame(updateBar);
+            }
+        }
+        
+        updateBar();
+    }
+    
+    function performRedirect() {
+        // Clear the state before redirecting
+        clearState();
+        
+        // Add a timestamp to prevent caching issues
+        const separator = retryUrl.includes('?') ? '&' : '?';
+        const timestamp = Date.now();
+        const redirectUrl = `${retryUrl}${separator}_rl=${timestamp}`;
+        
+        // Use replace instead of href to prevent back button issues
+        window.location.replace(redirectUrl);
+    }
+    
+    function manualRetry() {
+        if (manualRetryBtn.disabled) return;
+        
+        manualRetryBtn.disabled = true;
+        manualRetryBtn.textContent = 'Redirecting...';
+        
+        clearInterval(timerInterval);
+        performRedirect();
+    }
+    
+    // Initialize
+    function init() {
+        loadState();
+        
+        // Check if we've reached max attempts
+        if (attempts >= CONFIG.MAX_ATTEMPTS) {
+            updateUIForMaxAttempts();
+            return;
+        }
+        
+        // Increment attempts counter
+        attempts++;
+        saveState();
+        
+        // Calculate delay with exponential backoff
+        currentDelay = CONFIG.BASE_DELAY * Math.pow(CONFIG.BACKOFF_FACTOR, attempts - 1);
+        
+        // Update UI
+        status.textContent = `Retry attempt ${attempts} of ${CONFIG.MAX_ATTEMPTS}`;
+        attemptInfo.textContent = `Waiting ${currentDelay} seconds before retrying...`;
+        
+        // Start countdown
+        startCountdown(currentDelay);
+        
+        // Setup manual retry button (hidden by default)
+        manualRetryBtn.addEventListener('click', manualRetry);
+    }
+    
+    // Start initialization when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
+</script>
+
+</body>
+</html>
