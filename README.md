@@ -1,4 +1,4 @@
-# Rate Limit Page for Nginx 🚦
+# 429 Error Page for Nginx with Rate Limiting 🚦
 
 A friendly, dark-themed 429 page for Nginx that automatically retries your user's request with exponential backoff. It replaces the default error page with a calmer experience that shows progress, tracks attempts, and encourages patience. 🧘
 
